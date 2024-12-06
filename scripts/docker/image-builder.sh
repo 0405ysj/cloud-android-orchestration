@@ -14,8 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Shell script for running Cloud Orchestrator based on Docker
-# Please run in the root directory of this repository.
+script_location=`realpath -s $(dirname ${BASH_SOURCE[0]})`
+cloud_android_orchestration_root_dir=$(realpath -s $script_location/../..)
 
-CONFIG_FILE=scripts/docker/conf.toml \
-go run ./cmd/cloud_orchestrator
+if [[ "$1" == "" ]]; then
+    tag=cuttlefish-cloud-orchestration
+else
+    tag=$1
+fi
+
+# Build docker image
+pushd $cloud_android_orchestration_root_dir
+DOCKER_BUILDKIT=1 docker build \
+    --force-rm \
+    --no-cache \
+    --target runner-docker \
+    -t $tag \
+    .
+popd
