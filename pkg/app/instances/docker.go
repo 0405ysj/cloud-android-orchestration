@@ -17,6 +17,9 @@ package instances
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -28,13 +31,14 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 )
 
 const DockerIMType IMType = "docker"
 
 type DockerIMConfig struct {
-	DockerImageName      string
+	DockerImageNames     []string
 	HostOrchestratorPort int
 }
 
@@ -42,8 +46,9 @@ const dockerLabelCreatedBy = "created_by"
 
 // Docker implementation of the instance manager.
 type DockerInstanceManager struct {
-	Config Config
-	Client *client.Client
+	Config          Config
+	Client          *client.Client
+	DockerImageName string
 }
 
 type OPType string
@@ -53,11 +58,63 @@ const (
 	DeleteHostOPType OPType = "deletehost"
 )
 
-func NewDockerInstanceManager(cfg Config, cli *client.Client) *DockerInstanceManager {
-	return &DockerInstanceManager{
-		Config: cfg,
-		Client: cli,
+func NewDockerInstanceManager(cfg Config, cli *client.Client) (*DockerInstanceManager, error) {
+	ctx := context.TODO()
+
+	listRes, err := cli.ImageList(ctx, image.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("Failed to list docker images: %w", err)
 	}
+	for _, candidateImage := range cfg.Docker.DockerImageNames {
+		for _, existingImage := range listRes {
+			for _, existingTag := range existingImage.RepoTags {
+				if candidateImage == existingTag {
+					return &DockerInstanceManager{
+						Config:          cfg,
+						Client:          cli,
+						DockerImageName: candidateImage,
+					}, nil
+				}
+			}
+		}
+	}
+
+	var chosenImage string
+	shortestElapsed := time.Hour
+	for _, candidateImage := range cfg.Docker.DockerImageNames {
+		imageUrl, err := url.Parse(candidateImage)
+		if err != nil {
+			continue
+		}
+		imageUrl.Scheme = "https"
+		start := time.Now()
+		_, err = http.Get(imageUrl.String())
+		if err != nil {
+			continue
+		}
+		elapsed := time.Since(start)
+		if elapsed < shortestElapsed {
+			chosenImage = candidateImage
+			shortestElapsed = elapsed
+		}
+	}
+	if chosenImage == "" {
+		return nil, fmt.Errorf("No available docker images to download")
+	}
+
+	out, err := cli.ImagePull(ctx, chosenImage, image.PullOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("Failed to pull docker image '%s': %w", chosenImage, err)
+	}
+	defer out.Close()
+	io.Copy(io.Discard, out)
+	log.Println("Downloaded docker image: " + chosenImage)
+
+	return &DockerInstanceManager{
+		Config:          cfg,
+		Client:          cli,
+		DockerImageName: chosenImage,
+	}, nil
 }
 
 func (m *DockerInstanceManager) ListZones() (*apiv1.ListZonesResponse, error) {
@@ -75,7 +132,7 @@ func (m *DockerInstanceManager) CreateHost(zone string, _ *apiv1.CreateHostReque
 	ctx := context.TODO()
 	config := &container.Config{
 		AttachStdin: true,
-		Image:       m.Config.Docker.DockerImageName,
+		Image:       m.DockerImageName,
 		Tty:         true,
 		Labels: map[string]string{
 			dockerLabelCreatedBy: user.Username(),
@@ -111,7 +168,7 @@ func (m *DockerInstanceManager) ListHosts(zone string, user accounts.User, _ *Li
 		},
 		filters.KeyValuePair{
 			Key:   "ancestor",
-			Value: m.Config.Docker.DockerImageName,
+			Value: m.DockerImageName,
 		},
 	)
 	listRes, err := m.Client.ContainerList(ctx, container.ListOptions{
