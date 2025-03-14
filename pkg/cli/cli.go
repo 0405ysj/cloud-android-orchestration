@@ -28,6 +28,7 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	client "github.com/google/cloud-android-orchestration/pkg/client"
@@ -81,6 +82,7 @@ const (
 )
 
 const (
+	numHostsFlag          = "num_hosts"
 	gcpMachineTypeFlag    = "gcp_machine_type"
 	gcpMinCPUPlatformFlag = "gcp_min_cpu_platform"
 	gcpBootDiskSizeGBFlag = "gcp_boot_disk_size_gb"
@@ -510,6 +512,7 @@ func hostCommand(opts *subCommandOpts) *cobra.Command {
 			return runCreateHostCommand(c, createFlags, opts)
 		},
 	}
+	create.Flags().IntVar(&createFlags.NumHosts, numHostsFlag, 1, "Creates multiple hosts")
 	create.Flags().StringVar(&createFlags.GCP.MachineType, gcpMachineTypeFlag,
 		opts.InitialConfig.DefaultService().Host.GCP.MachineType, gcpMachineTypeFlagDesc)
 	create.Flags().StringVar(&createFlags.GCP.MinCPUPlatform, gcpMinCPUPlatformFlag,
@@ -630,6 +633,8 @@ func cvdCommands(opts *subCommandOpts) []*cobra.Command {
 		}
 	}
 	// Host flags
+	create.Flags().IntVar(&createFlags.NumHosts, numHostsFlag, 1, "Creates multiple hosts with same configuration")
+	create.MarkFlagsMutuallyExclusive(hostFlag, numHostsFlag)
 	createHostFlags := []struct {
 		ValueRef *string
 		Name     string
@@ -798,12 +803,30 @@ func runCreateHostCommand(c *cobra.Command, flags *CreateHostFlags, opts *subCom
 	if err != nil {
 		return fmt.Errorf("failed to build service instance: %w", err)
 	}
-	ins, err := createHost(srvClient, *flags.CreateHostOpts)
-	if err != nil {
-		return fmt.Errorf("failed to create host: %w", err)
+	if flags.NumHosts <= 0 {
+		return fmt.Errorf("invalid --%s flag value: %d", numHostsFlag, flags.NumHosts)
 	}
-	c.Printf("%s\n", ins.Name)
-	return nil
+	var wg sync.WaitGroup
+	errCh := make(chan error, flags.NumHosts)
+	for i := 0; i < flags.NumHosts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ins, err := createHost(srvClient, *flags.CreateHostOpts)
+			if err != nil {
+				errCh <- fmt.Errorf("failed to create host: %w", err)
+				return
+			}
+			c.Printf("%s\n", ins.Name)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	var merr error
+	for err := range errCh {
+		merr = multierror.Append(merr, err)
+	}
+	return merr
 }
 
 func runListHostCommand(c *cobra.Command, flags *ServiceFlags, opts *subCommandOpts) error {
@@ -876,58 +899,83 @@ func runCreateCVDCommand(c *cobra.Command, args []string, flags *CreateCVDFlags,
 		}
 		flags.CreateCVDOpts.EnvConfig = envConfig
 	}
-	if flags.NumInstances <= 0 {
-		return fmt.Errorf("invalid --num_instances flag value: %d", flags.NumInstances)
+	if flags.NumHosts <= 0 {
+		return fmt.Errorf("invalid --%s flag value: %d", numHostsFlag, flags.NumHosts)
 	}
-	statePrinter := newStatePrinter(c.ErrOrStderr(), flags.Verbose)
+	if flags.NumInstances <= 0 {
+		return fmt.Errorf("invalid --%s flag value: %d", numInstancesFlag, flags.NumInstances)
+	}
+	statePrinter := newStatePrinter(c.ErrOrStderr(), flags.Verbose || flags.NumHosts > 1)
 	srvClient, err := newClient(opts.InitialConfig, flags.ServiceFlags, c)
 	if err != nil {
 		return fmt.Errorf("failed to build service instance: %w", err)
 	}
-	if flags.CreateCVDOpts.Host == "" {
-		statePrinter.Print(createHostStateMsg)
-		ins, err := createHost(srvClient, *flags.CreateHostOpts)
-		statePrinter.PrintDone(createHostStateMsg, err)
-		if err != nil {
-			return fmt.Errorf("failed to create host: %w", err)
-		}
-		flags.CreateCVDOpts.Host = ins.Name
-	}
-	cvds, err := createCVD(srvClient, *flags.CreateCVDOpts, statePrinter)
-	if err != nil {
-		var apiErr *client.ApiCallError
-		if errors.As(err, &apiErr) && apiErr.Code == http.StatusUnauthorized {
-			c.PrintErrf("Authorization required, please visit %s/auth\n", flags.ServiceURL)
-		}
-		return err
-	}
-	var merr error
-	if flags.CreateCVDOpts.AutoConnect {
-		connectAgent := ConnectionWebRTCAgentCommandName
-		if flags.CreateCVDOpts.ConnectAgent != "" {
-			connectAgent = flags.CreateCVDOpts.ConnectAgent
-		}
-		for _, cvd := range cvds {
-			statePrinter.Print(fmt.Sprintf(connectCVDStateMsgFmt, cvd.WebRTCDeviceID))
-			cvd.ConnStatus, err = ConnectDevice(flags.CreateCVDOpts.Host, cvd.WebRTCDeviceID, "", connectAgent, &command{c, &flags.Verbose}, opts)
-			statePrinter.PrintDone(fmt.Sprintf(connectCVDStateMsgFmt, cvd.WebRTCDeviceID), err)
-			if err != nil {
-				merr = multierror.Append(merr, fmt.Errorf("failed to connect to device: %w", err))
+	var wg sync.WaitGroup
+	errCh := make(chan error, flags.NumHosts)
+	for i := 0; i < flags.NumHosts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cvdopts := *flags.CreateCVDOpts
+			if cvdopts.Host == "" {
+				statePrinter.Print(createHostStateMsg)
+				ins, err := createHost(srvClient, *flags.CreateHostOpts)
+				statePrinter.PrintDone(createHostStateMsg, err)
+				if err != nil {
+					errCh <- fmt.Errorf("failed to create host: %w", err)
+					return
+				}
+				cvdopts.Host = ins.Name
 			}
-		}
+			cvds, err := createCVD(srvClient, cvdopts, statePrinter)
+			if err != nil {
+				var apiErr *client.ApiCallError
+				if errors.As(err, &apiErr) && apiErr.Code == http.StatusUnauthorized {
+					c.PrintErrf("Authorization required, please visit %s/auth\n", flags.ServiceURL)
+				}
+				errCh <- err
+				return
+			}
+			var merr error
+			if cvdopts.AutoConnect {
+				connectAgent := ConnectionWebRTCAgentCommandName
+				if cvdopts.ConnectAgent != "" {
+					connectAgent = cvdopts.ConnectAgent
+				}
+				for _, cvd := range cvds {
+					statePrinter.Print(fmt.Sprintf(connectCVDStateMsgFmt, cvd.WebRTCDeviceID))
+					cvd.ConnStatus, err = ConnectDevice(cvdopts.Host, cvd.WebRTCDeviceID, "", connectAgent, &command{c, &flags.Verbose}, opts)
+					statePrinter.PrintDone(fmt.Sprintf(connectCVDStateMsgFmt, cvd.WebRTCDeviceID), err)
+					if err != nil {
+						merr = multierror.Append(merr, fmt.Errorf("failed to connect to device: %w", err))
+					}
+				}
+			}
+			if merr != nil {
+				errCh <- merr
+				return
+			}
+			hostSrvURL, err := srvClient.HostServiceURL(cvdopts.Host)
+			if err != nil {
+				errCh <- fmt.Errorf("failed getting host service url: %w", err)
+				return
+			}
+			hosts := []*RemoteHost{
+				{
+					ServiceURL: hostSrvURL,
+					Name:       cvdopts.Host,
+					CVDs:       cvds,
+				},
+			}
+			WriteListCVDsOutput(c.OutOrStdout(), hosts)
+		}()
 	}
-	hostSrvURL, err := srvClient.HostServiceURL(flags.CreateCVDOpts.Host)
-	if err != nil {
-		return fmt.Errorf("failed getting host service url: %w", err)
+	wg.Wait()
+	close(errCh)
+	var merr error
+	for err := range errCh {
+		merr = multierror.Append(merr, err)
 	}
-	hosts := []*RemoteHost{
-		{
-			ServiceURL: hostSrvURL,
-			Name:       flags.CreateCVDOpts.Host,
-			CVDs:       cvds,
-		},
-	}
-	WriteListCVDsOutput(c.OutOrStdout(), hosts)
 	return merr
 }
 
