@@ -38,6 +38,19 @@ SSH dynamic port forwarding is available with following command.
 ```bash
 ssh -D ${SOCKS5_PORT} -q -C -N ${USERNAME}@${CLOUD_ORCHESTRATOR_IPv4_ADDRESS}
 ```
+
+## podman poc
+```
+sudo chmod 666 /dev/kvm /dev/vhost-net /dev/vhost-vsock
+podman run -d \
+    --network podman \
+    -p 8080:8080 \
+    -e CONFIG_FILE="/conf.toml" \
+    -v $PWD/scripts/on-premises/single-server/conf.toml:/conf.toml \
+    -v /run/user/884439/podman/podman.sock:/var/run/docker.sock \
+    -t localhost/cuttlefish-cloud-orchestrator:latest
+```
+
 ## Use cloud orchestrator by cvdr
 
 The config file for `cvdr` is located at

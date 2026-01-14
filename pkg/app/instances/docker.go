@@ -226,7 +226,7 @@ func (m *DockerInstanceManager) WaitOperation(zone string, _ accounts.User, name
 }
 
 func (m *DockerInstanceManager) getIpAddr(container *types.Container) (string, error) {
-	bridgeNetwork := container.NetworkSettings.Networks["bridge"]
+	bridgeNetwork := container.NetworkSettings.Networks["podman"]
 	if bridgeNetwork == nil {
 		return "", fmt.Errorf("failed to find network information of docker instance")
 	}
@@ -415,8 +415,8 @@ func (m *DockerInstanceManager) createDockerContainer(ctx context.Context, user 
 	}
 	execConfig := container.ExecOptions{
 		Cmd:          []string{"chown", "httpcvd:httpcvd", uaMountTarget},
-		AttachStdout: false,
-		AttachStderr: false,
+		AttachStdout: true,
+		AttachStderr: true,
 		Tty:          false,
 	}
 	execRes, err := m.Client.ContainerExecCreate(ctx, createRes.ID, execConfig)

@@ -26,7 +26,7 @@ HostOrchestratorProtocol = "http"
 AllowSelfSignedHostSSLCertificate = true
 
 [InstanceManager.Docker]
-DockerImageName = "cuttlefish-orchestration:latest"
+DockerImageName = "localhost/cuttlefish-orchestration:latest"
 HostOrchestratorPort = 2080
 
 [[WebRTC.IceServers]]
