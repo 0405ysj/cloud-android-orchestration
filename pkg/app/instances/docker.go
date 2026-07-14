@@ -393,6 +393,14 @@ func (m *DockerInstanceManager) createDockerContainer(ctx context.Context, user 
 				Source: uaVolumeName(user),
 				Target: uaMountTarget,
 			},
+			{
+				Type:   mount.TypeVolume,
+				Target: "/var/tmp/cvd",
+			},
+			{
+				Type:   mount.TypeVolume,
+				Target: "/tmp",
+			},
 		},
 		Resources: container.Resources{
 			Devices: []container.DeviceMapping{
@@ -429,7 +437,7 @@ func (m *DockerInstanceManager) createDockerContainer(ctx context.Context, user 
 		return "", fmt.Errorf("failed to start docker container: %w", err)
 	}
 	execConfig := container.ExecOptions{
-		Cmd:          []string{"chown", "httpcvd:httpcvd", uaMountTarget},
+		Cmd:          []string{"chown", "httpcvd:httpcvd", uaMountTarget, "/var/tmp/cvd", "/tmp"},
 		AttachStdout: false,
 		AttachStderr: false,
 		Tty:          false,
@@ -453,7 +461,7 @@ func (m *DockerInstanceManager) deleteDockerContainer(ctx context.Context, user 
 	if err := m.Client.ContainerStop(ctx, host, container.StopOptions{}); err != nil {
 		return fmt.Errorf("failed to stop docker container: %w", err)
 	}
-	if err := m.Client.ContainerRemove(ctx, host, container.RemoveOptions{}); err != nil {
+	if err := m.Client.ContainerRemove(ctx, host, container.RemoveOptions{RemoveVolumes: true}); err != nil {
 		return fmt.Errorf("failed to remove docker container: %w", err)
 	}
 	return nil
